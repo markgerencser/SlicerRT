@@ -37,6 +37,9 @@
 // SlicerQt includes
 #include "qSlicerApplication.h"
 
+// Slicer includes
+#include <qSlicerUtils.h>
+
 #define ID_PROPERTY "ID"
 
 //-----------------------------------------------------------------------------
@@ -246,32 +249,32 @@ void qMRMLBeamsTableView::updateBeamTable()
     // Beam number
     QString beamNumber = QString::number(beamNode->GetBeamNumber());
     QTableWidgetItem* numberItem = new QTableWidgetItem(beamNumber);
-    numberItem->setData(IDRole, beamNode->GetID());
+    numberItem->setData(IDRole, qSlicerUtils::safeQStringFromUtf8Ptr(beamNode->GetID()));
     d->BeamsTable->setItem(row, d->columnIndex("Number"), numberItem);
 
     // Beam name
     QString name(beamNode->GetName());
     QTableWidgetItem* nameItem = new QTableWidgetItem(name);
-    nameItem->setData(IDRole, beamNode->GetID());
+    nameItem->setData(IDRole, qSlicerUtils::safeQStringFromUtf8Ptr(beamNode->GetID()));
     d->BeamsTable->setItem(row, d->columnIndex("Name"), nameItem);
 
     // Gantry angle
     QString gantryAngle = QString::number(beamNode->GetGantryAngle());
     QTableWidgetItem* gantryAngleItem = new QTableWidgetItem(gantryAngle);
-    gantryAngleItem->setData(IDRole, beamNode->GetID());
+    gantryAngleItem->setData(IDRole, qSlicerUtils::safeQStringFromUtf8Ptr(beamNode->GetID()));
     d->BeamsTable->setItem(row, d->columnIndex("Gantry"), gantryAngleItem);
 
     // Beam weight
     QString beamWeight = QString::number(beamNode->GetBeamWeight());
     QTableWidgetItem* beamWeightItem = new QTableWidgetItem(beamWeight);
-    beamWeightItem->setData(IDRole, beamNode->GetID());
+    beamWeightItem->setData(IDRole, qSlicerUtils::safeQStringFromUtf8Ptr(beamNode->GetID()));
     d->BeamsTable->setItem(row, d->columnIndex("Weight"), beamWeightItem);
 
     // Edit button
     QPushButton* editButton = new QPushButton("Edit");
     editButton->setMaximumWidth(52);
     editButton->setToolTip("Show beam details in Beams module");
-    editButton->setProperty(ID_PROPERTY, beamNode->GetID());
+    editButton->setProperty(ID_PROPERTY, qSlicerUtils::safeQStringFromUtf8Ptr(beamNode->GetID()));
     connect(editButton, SIGNAL(clicked()), this, SLOT(onEditButtonClicked()));
     d->BeamsTable->setCellWidget(row, d->columnIndex("Edit"), editButton);
 
@@ -279,7 +282,7 @@ void qMRMLBeamsTableView::updateBeamTable()
     QPushButton* cloneButton = new QPushButton("Clone");
     cloneButton->setMaximumWidth(52);
     cloneButton->setToolTip("Create a copy of this beam");
-    cloneButton->setProperty(ID_PROPERTY, beamNode->GetID());
+    cloneButton->setProperty(ID_PROPERTY, qSlicerUtils::safeQStringFromUtf8Ptr(beamNode->GetID()));
     connect(cloneButton, SIGNAL(clicked()), this, SLOT(onCloneButtonClicked()));
     d->BeamsTable->setCellWidget(row, d->columnIndex("Clone"), cloneButton);
 }

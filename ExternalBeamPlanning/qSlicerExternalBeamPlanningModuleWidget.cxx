@@ -71,7 +71,7 @@
 
 // Qt includes
 #include <QDebug>
-#include <QTime>
+#include <QElapsedTimer>
 #include <QItemSelection>
 #include <QMessageBox>
 #include <QDir>
@@ -1345,7 +1345,7 @@ void qSlicerExternalBeamPlanningModuleWidget::calculateDoseClicked()
   }
 
   // Start timer
-  QTime time;
+  QElapsedTimer time;
   time.start();
   // Set busy cursor
   QApplication::setOverrideCursor(QCursor(Qt::BusyCursor));
@@ -1387,7 +1387,7 @@ void qSlicerExternalBeamPlanningModuleWidget::calculateDoseClicked()
 
   if (errorMessage.isEmpty())
   {
-    QString message = QString("Dose calculated successfully in %1 s").arg(time.elapsed()/1000.0);
+    QString message = QString("Dose calculated successfully in %1 s").arg(static_cast<double>(time.elapsed()/1000.0));
     qDebug() << Q_FUNC_INFO << ": " << message;
     d->label_CalculateDoseStatus->setText(message);
   }
@@ -1430,7 +1430,7 @@ void qSlicerExternalBeamPlanningModuleWidget::optimizePlanClicked()
   }
 
   // Start timer
-  QTime time;
+  QElapsedTimer time;
   time.start();
   // Set busy cursor
   QApplication::setOverrideCursor(QCursor(Qt::BusyCursor));
@@ -1458,7 +1458,7 @@ void qSlicerExternalBeamPlanningModuleWidget::optimizePlanClicked()
 
   if (errorMessage.isEmpty())
   {
-    QString message = QString("Optimization calculated successfully in %1 s").arg(time.elapsed() / 1000.0);
+    QString message = QString("Optimization calculated successfully in %1 s").arg(static_cast<double>(time.elapsed() / 1000.0));
     qDebug() << Q_FUNC_INFO << ": " << message;
     d->label_OptimizationStatus->setText(message);
   }
