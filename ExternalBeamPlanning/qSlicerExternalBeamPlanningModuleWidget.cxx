@@ -344,7 +344,7 @@ void qSlicerExternalBeamPlanningModuleWidget::setup()
 
   connect( d->checkBox_InversePlanning, SIGNAL(stateChanged(int)), this, SLOT(inversePlanningCheckboxStateChanged(int)));
 
-  connect( d->comboBox_DoseEngine, SIGNAL(currentIndexChanged(const QString&)), this, SLOT(doseEngineChanged(const QString&)) );
+  connect( d->comboBox_DoseEngine, SIGNAL(currentTextChanged(const QString&)), this, SLOT(doseEngineChanged(const QString&)) );
   connect( d->doubleSpinBox_RxDose, SIGNAL(valueChanged(double)), this, SLOT(rxDoseChanged(double)) );
 
   // Output section
@@ -366,7 +366,7 @@ void qSlicerExternalBeamPlanningModuleWidget::setup()
   connect( d->pushButton_ClearDose, SIGNAL(clicked()), this, SLOT(clearDoseClicked()) );
 
   // Plan Optimization
-  connect( d->comboBox_PlanOptimizer, SIGNAL(currentIndexChanged(const QString&)), this, SLOT(PlanOptimizerChanged(const QString&)));
+  connect( d->comboBox_PlanOptimizer, SIGNAL(currentTextChanged(const QString&)), this, SLOT(PlanOptimizerChanged(const QString&)));
   connect( d->pushButton_OptimizePlan, SIGNAL(clicked()), this, SLOT(optimizePlanClicked()));
 
   // Objective Table
