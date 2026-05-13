@@ -65,7 +65,9 @@ public:
     /// Fired if dose engine is changed
     DoseEngineChanged,
     /// Fired if optimization engine is changed
-    PlanOptimizerChanged
+    PlanOptimizerChanged,
+    /// Fired if optimization engine is changed
+    InversePlanFlagChanged
   };
 
 public:
@@ -178,6 +180,11 @@ public:
   /// Set target segment ID
   vtkSetStringMacro(TargetSegmentID);
 
+  /// Get body segment ID
+  vtkGetStringMacro(BodySegmentID);
+  /// Set body segment ID
+  vtkSetStringMacro(BodySegmentID);
+
   /// Get isocenter specification
   vtkGetMacro(IsocenterSpecification, vtkMRMLRTPlanNode::IsocenterSpecificationType);
 
@@ -217,6 +224,11 @@ public:
   /// Set dose grid to ct grid
   void SetDoseGridSpacingToCTGridSpacing();
 
+  /// Get flag for inverse plan
+  vtkGetMacro(InversePlanFlag, bool);
+  /// Set flag for inverse plan
+  void SetInversePlanFlag(bool InversePlanFlag);
+
   /// Get flag for ion plan
   vtkGetMacro( IonPlanFlag, bool);
   /// Set flag for ion plan
@@ -247,6 +259,9 @@ protected:
   /// Target segment ID in target segmentation node
   char* TargetSegmentID{ nullptr };
 
+  /// Body segment ID in segmentation node
+  char* BodySegmentID{ nullptr };
+
   /// Isocenter specification determining whether it can be an arbitrary point or
   /// always calculated to be at the center of the target structure
   IsocenterSpecificationType IsocenterSpecification{ vtkMRMLRTPlanNode::CenterOfTarget };
@@ -263,6 +278,9 @@ protected:
   /// Allows user to specify dose volume resolution different from reference volume
   //TODO: Explain here why this is defined in the plan node as well as the beam node
   double DoseGridSpacing[3]{ 5.0, 5.0, 5.0 };
+
+  /// Flag, indicates that a plan node is currently doing inverse planning
+  bool InversePlanFlag{ false };
 
   /// Flag, indicates that a plan node is an ion plan node
   bool IonPlanFlag{ false };

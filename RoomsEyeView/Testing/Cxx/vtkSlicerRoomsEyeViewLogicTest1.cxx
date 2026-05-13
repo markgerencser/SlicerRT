@@ -39,6 +39,9 @@
 #include <vtkTransform.h>
 #include <vtkMatrix4x4.h>
 
+// STD includes
+#include <iostream>
+
 
 //----------------------------------------------------------------------------
 /// Get all linear transforms from the scene that are not identity, and are not beam transform nodes
@@ -284,7 +287,7 @@ int vtkSlicerRoomsEyeViewLogicTest1(int vtkNotUsed(argc), char* vtkNotUsed(argv)
     revLogic->GetTransformNodeBetween(vtkIECTransformLogic::PatientSupportRotation, vtkIECTransformLogic::FixedReference),
     expectedPatientSupportRotationToFixedReferenceTransformMinus1_MatrixElements))
   {
-    std:cerr << __LINE__ << ": PatientSupportRotationToFixedReference does not match baseline for -1 degree angle" << std::endl;
+    std::cerr << __LINE__ << ": PatientSupportRotationToFixedReference does not match baseline for -1 degree angle" << std::endl;
     return EXIT_FAILURE;
   }
 

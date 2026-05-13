@@ -28,15 +28,17 @@
 
 // SlicerRT includes
 #include "vtkMRMLRTBeamNode.h"
+#include "vtkMRMLRTPlanNode.h"
 #include "vtkSlicerBeamsModuleLogic.h"
 
 // MRML includes
 #include <vtkMRMLDisplayNode.h>
 #include <vtkMRMLLinearTransformNode.h>
+#include <vtkMRMLMarkupsFiducialNode.h>
 #include <vtkMRMLModelNode.h>
 #include <vtkMRMLModelDisplayNode.h>
 #include <vtkMRMLScene.h>
-#include "vtkMRMLSubjectHierarchyNode.h"
+#include <vtkMRMLSubjectHierarchyNode.h>
 #include <vtkMRMLViewNode.h>
 
 // Slicer includes
@@ -48,16 +50,21 @@
 
 // VTK includes
 #include <vtkAppendPolyData.h>
-#include "vtkCollisionDetectionFilter.h"
+#include <vtkCallbackCommand.h>
+#include <vtkCollisionDetectionFilter.h>
 #include <vtkGeneralTransform.h>
 #include <vtkMatrix4x4.h>
 #include <vtkObjectFactory.h>
 #include <vtkPolyDataReader.h>
 #include <vtkSmartPointer.h>
+#include <vtkWeakPointer.h>
 #include <vtkTransform.h>
 #include <vtkTransformFilter.h>
 #include <vtkTransformPolyDataFilter.h>
 #include <vtkVector.h>
+
+// STD includes
+#include <iostream>
 
 // VTKSYS includes
 #include <vtksys/SystemTools.hxx>
@@ -84,7 +91,7 @@ public:
   vtkInternal(vtkSlicerRoomsEyeViewModuleLogic* external);
   ~vtkInternal();
 
-  vtkSlicerRoomsEyeViewModuleLogic* External; 
+  vtkSlicerRoomsEyeViewModuleLogic* External;
   rapidjson::Document* CurrentTreatmentMachineDescription{nullptr};
 
   /// Utility function to get element for treatment machine part
@@ -92,11 +99,25 @@ public:
   rapidjson::Value& GetTreatmentMachinePart(TreatmentMachinePartType partType);
   rapidjson::Value& GetTreatmentMachinePart(std::string partTypeStr);
 
+  vtkIdType EnsureMachineComponentsSubjectHierarchyFolder(vtkMRMLRoomsEyeViewNode* parameterNode);
   std::string GetTreatmentMachinePartFullFilePath(vtkMRMLRoomsEyeViewNode* parameterNode, std::string partPath);
   std::string GetTreatmentMachineFileNameWithoutExtension(vtkMRMLRoomsEyeViewNode* parameterNode);
   std::string GetTreatmentMachinePartModelName(vtkMRMLRoomsEyeViewNode* parameterNode, TreatmentMachinePartType partType);
   vtkMRMLModelNode* GetTreatmentMachinePartModelNode(vtkMRMLRoomsEyeViewNode* parameterNode, TreatmentMachinePartType partType);
   vtkMRMLModelNode* EnsureTreatmentMachinePartModelNode(vtkMRMLRoomsEyeViewNode* parameterNode, TreatmentMachinePartType partType, bool optional=false);
+  vtkMRMLMarkupsFiducialNode* EnsureTableTopCenterPointFiducialNode(vtkMRMLRoomsEyeViewNode* parameterNode);
+
+  /// Keep track of the currently observed POI markups node, its plan, param node, and observer tags
+  vtkMRMLMarkupsFiducialNode* ObservedPOIMarkupsFiducialNode{nullptr};
+  vtkMRMLRTPlanNode* ObservedPlanNode{nullptr};
+  vtkMRMLRoomsEyeViewNode* ObservedParamNode{nullptr};
+  std::vector<unsigned long> POIMarkupsFiducialNodeObserverTags;
+
+  /// Keep track of the currently observed TableTopCenter fiducial node and its observer tags.
+  /// Using vtkWeakPointer so the pointer auto-nulls if the node is deleted (e.g. scene clear).
+  vtkWeakPointer<vtkMRMLMarkupsFiducialNode> ObservedTableTopCenterFiducialNode;
+  vtkWeakPointer<vtkMRMLRoomsEyeViewNode> ObservedTableTopCenterParamNode;
+  std::vector<unsigned long> TableTopCenterFiducialNodeObserverTags;
 };
 
 //---------------------------------------------------------------------------
@@ -160,6 +181,35 @@ rapidjson::Value& vtkSlicerRoomsEyeViewModuleLogic::vtkInternal::GetTreatmentMac
 
   // Not found
   return JSON_EMPTY_VALUE;
+}
+
+//---------------------------------------------------------------------------
+vtkIdType vtkSlicerRoomsEyeViewModuleLogic::vtkInternal::EnsureMachineComponentsSubjectHierarchyFolder(vtkMRMLRoomsEyeViewNode* parameterNode)
+{
+  vtkMRMLScene* scene = this->External->GetMRMLScene();
+  if (!scene || !parameterNode)
+  {
+    vtkErrorWithObjectMacro(this->External, "EnsureMachineComponentsSubjectHierarchyFolder: Invalid scene or parameter node");
+    return vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = scene->GetSubjectHierarchyNode();
+  if (!shNode)
+  {
+    vtkErrorWithObjectMacro(this->External, "EnsureMachineComponentsSubjectHierarchyFolder: Failed to access subject hierarchy node");
+    return vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  }
+
+  // Get root SH item
+  std::string machineType = this->GetTreatmentMachineFileNameWithoutExtension(parameterNode);
+  std::string rootFolderName = machineType + std::string("_Components");
+  vtkIdType rootFolderItem = shNode->GetItemChildWithName(shNode->GetSceneItemID(), rootFolderName);
+  if (!rootFolderItem)
+  {
+    // Create subject hierarchy folder so that the treatment machine can be shown/hidden easily
+    rootFolderItem = shNode->CreateFolderItem(shNode->GetSceneItemID(), rootFolderName);
+    shNode->SetItemAttribute(rootFolderItem, TREATMENT_MACHINE_DESCRIPTOR_FILE_PATH_ATTRIBUTE_NAME, parameterNode->GetTreatmentMachineDescriptorFilePath());
+  }
+  return rootFolderItem;
 }
 
 //---------------------------------------------------------------------------
@@ -234,26 +284,17 @@ vtkMRMLModelNode* vtkSlicerRoomsEyeViewModuleLogic::vtkInternal::EnsureTreatment
   vtkMRMLScene* scene = this->External->GetMRMLScene();
   if (!scene || !parameterNode)
   {
-    vtkErrorWithObjectMacro(this->External, "GetTreatmentMachinePartModelName: Invalid scene or parameter node");
+    vtkErrorWithObjectMacro(this->External, "EnsureTreatmentMachinePartModelNode: Invalid scene or parameter node");
     return nullptr;
   }
   vtkMRMLSubjectHierarchyNode* shNode = scene->GetSubjectHierarchyNode();
   if (!shNode)
   {
-    vtkErrorWithObjectMacro(this->External, "LoadTreatmentMachine: Failed to access subject hierarchy node");
+    vtkErrorWithObjectMacro(this->External, "EnsureTreatmentMachinePartModelNode: Failed to access subject hierarchy node");
     return nullptr;
   }
 
-  // Get root SH item
-  std::string machineType = this->GetTreatmentMachineFileNameWithoutExtension(parameterNode);
-  std::string rootFolderName = machineType + std::string("_Components");
-  vtkIdType rootFolderItem = shNode->GetItemChildWithName(shNode->GetSceneItemID(), rootFolderName);
-  if (!rootFolderItem)
-  {
-    // Create subject hierarchy folder so that the treatment machine can be shown/hidden easily
-    rootFolderItem = shNode->CreateFolderItem(shNode->GetSceneItemID(), rootFolderName);
-  }
-
+  vtkIdType rootFolderItem = this->EnsureMachineComponentsSubjectHierarchyFolder(parameterNode);
   std::string partName = this->GetTreatmentMachinePartModelName(parameterNode, partType);
   vtkMRMLModelNode* partModelNode = this->GetTreatmentMachinePartModelNode(parameterNode, partType);
   if (!partModelNode)
@@ -268,10 +309,10 @@ vtkMRMLModelNode* vtkSlicerRoomsEyeViewModuleLogic::vtkInternal::EnsureTreatment
       }
       else
       {
-        vtkWarningWithObjectMacro(this->External, "LoadTreatmentMachine: State for part "
+        vtkWarningWithObjectMacro(this->External, "EnsureTreatmentMachinePartModelNode: State for part "
           << partName << " is set to Disabled but the part is mandatory. Loading anyway.");
       }
-    }     
+    }
     // Get model file path
     std::string partModelFilePath = this->External->GetFilePathForPartType(
       this->External->GetTreatmentMachinePartTypeAsString(partType));
@@ -279,7 +320,7 @@ vtkMRMLModelNode* vtkSlicerRoomsEyeViewModuleLogic::vtkInternal::EnsureTreatment
     {
       if (!optional)
       {
-        vtkErrorWithObjectMacro(this->External, "LoadTreatmentMachine: Failed get file path for part "
+        vtkErrorWithObjectMacro(this->External, "EnsureTreatmentMachinePartModelNode: Failed get file path for part "
           << partName << ". This mandatory part may be missing from the descriptor file");
       }
       return nullptr;
@@ -298,12 +339,47 @@ vtkMRMLModelNode* vtkSlicerRoomsEyeViewModuleLogic::vtkInternal::EnsureTreatment
     }
     else if (!optional)
     {
-      vtkErrorWithObjectMacro(this->External, "LoadTreatmentMachine: Failed to load " << partName << " model from file " << partModelFilePath);
+      vtkErrorWithObjectMacro(this->External, "EnsureTreatmentMachinePartModelNode: Failed to load " << partName << " model from file " << partModelFilePath);
       return nullptr;
     }
   }
   return partModelNode;
 }
+
+//---------------------------------------------------------------------------
+vtkMRMLMarkupsFiducialNode* vtkSlicerRoomsEyeViewModuleLogic::vtkInternal::EnsureTableTopCenterPointFiducialNode(vtkMRMLRoomsEyeViewNode* parameterNode)
+{
+  vtkMRMLScene* scene = this->External->GetMRMLScene();
+  if (!scene || !parameterNode)
+  {
+    vtkErrorWithObjectMacro(this->External, "EnsureTableTopCenterPointFiducialNode: Invalid scene or parameter node");
+    return nullptr;
+  }
+  if (parameterNode->GetTableTopCenterPointFiducialNode())
+  {
+    return parameterNode->GetTableTopCenterPointFiducialNode();
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = scene->GetSubjectHierarchyNode();
+  if (!shNode)
+  {
+    vtkErrorWithObjectMacro(this->External, "EnsureTableTopCenterPointFiducialNode: Failed to access subject hierarchy node");
+    return nullptr;
+  }
+
+  vtkMRMLMarkupsFiducialNode* fiducialNode = vtkMRMLMarkupsFiducialNode::SafeDownCast(
+    scene->AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "TableTopCenter"));
+  fiducialNode->SetDisplayVisibility(false);
+  parameterNode->SetAndObserveTableTopCenterPointFiducialNode(fiducialNode);
+  // Only parent to the machine components folder if a machine has been loaded
+  if (parameterNode->GetTreatmentMachineDescriptorFilePath())
+  {
+    vtkIdType rootFolderItem = this->EnsureMachineComponentsSubjectHierarchyFolder(parameterNode);
+    vtkIdType fiducialItemID = shNode->GetItemByDataNode(fiducialNode);
+    shNode->SetItemParent(fiducialItemID, rootFolderItem);
+  }
+  return fiducialNode;
+}
+
 
 //---------------------------------------------------------------------------
 // vtkSlicerRoomsEyeViewModuleLogic methods
@@ -316,7 +392,7 @@ vtkSlicerRoomsEyeViewModuleLogic::vtkSlicerRoomsEyeViewModuleLogic()
   , CollimatorPatientCollisionDetection(nullptr)
   , CollimatorTableTopCollisionDetection(nullptr)
 {
-  this->Internal = new vtkInternal(this); 
+  this->Internal = new vtkInternal(this);
 
   this->IECLogic = vtkIECTransformLogic::New();
 
@@ -618,7 +694,7 @@ void vtkSlicerRoomsEyeViewModuleLogic::BuildRoomsEyeViewTransformHierarchy()
 
 
   // Make sure the fixed reference to RAS is correct
-  beamsLogic->UpdateRASRelatedTransforms(this->IECLogic);
+  beamsLogic->UpdateFixedReferenceToRASTransform(this->IECLogic);
 }
 
 //----------------------------------------------------------------------------
@@ -643,34 +719,42 @@ vtkSlicerRoomsEyeViewModuleLogic::LoadTreatmentMachine(vtkMRMLRoomsEyeViewNode* 
     return std::vector<TreatmentMachinePartType>();
   }
 
+  // Create the table top center point fiducial node if it does not exist yet
+  this->Internal->EnsureTableTopCenterPointFiducialNode(parameterNode);
+
   // Make sure the transform hierarchy is in place
   this->BuildRoomsEyeViewTransformHierarchy();
 
+  // Set up observers on the TableTopCenter fiducial node (must be after BuildRoomsEyeViewTransformHierarchy
+  // so that the transform nodes exist when the observer fires immediately)
+  this->UpdateTableTopCenterObservers(parameterNode);
+
+  // Set up observers on the plan's POI markups fiducial node (must be after BuildRoomsEyeViewTransformHierarchy
+  // so that the transform nodes exist when OnPlanPOIChanged fires immediately)
+  this->UpdatePlanPOIObservers(parameterNode);
+
   std::string moduleShareDirectory = this->GetModuleShareDirectory();
   std::string descriptorFilePath(parameterNode->GetTreatmentMachineDescriptorFilePath());
-  std::string machineType = this->Internal->GetTreatmentMachineFileNameWithoutExtension(parameterNode);
 
   // Load treatment machine JSON descriptor file
-  FILE *fp = fopen(descriptorFilePath.c_str(), "r");
+  FILE* fp = fopen(descriptorFilePath.c_str(), "r");
   if (!fp)
-    {
-      vtkErrorMacro("LoadTreatmentMachine: Failed to load treatment machine descriptor file '" << descriptorFilePath << "'");
-      return std::vector<TreatmentMachinePartType>();
-    }
+  {
+    vtkErrorMacro("LoadTreatmentMachine: Failed to load treatment machine descriptor file '" << descriptorFilePath << "'");
+    return std::vector<TreatmentMachinePartType>();
+  }
   char buffer[4096];
   rapidjson::FileReadStream fs(fp, buffer, sizeof(buffer));
   if (this->Internal->CurrentTreatmentMachineDescription->ParseStream(fs).HasParseError())
-    {
-      vtkErrorMacro("LoadTreatmentMachine: Failed to load treatment machine descriptor file '" << descriptorFilePath << "'");
-      fclose(fp);
-      return std::vector<TreatmentMachinePartType>();
-    }
+  {
+    vtkErrorMacro("LoadTreatmentMachine: Failed to load treatment machine descriptor file '" << descriptorFilePath << "'");
+    fclose(fp);
+    return std::vector<TreatmentMachinePartType>();
+  }
   fclose(fp);
 
-  // Create subject hierarchy folder so that the treatment machine can be shown/hidden easily
-  std::string subjectHierarchyFolderName = machineType + std::string("_Components");
-  vtkIdType rootFolderItem = shNode->CreateFolderItem(shNode->GetSceneItemID(), subjectHierarchyFolderName);
-  shNode->SetItemAttribute(rootFolderItem, TREATMENT_MACHINE_DESCRIPTOR_FILE_PATH_ATTRIBUTE_NAME, descriptorFilePath);
+  // Make sure we have a subject hierarchy folder so that the treatment machine can be shown/hidden easily
+  this->Internal->EnsureMachineComponentsSubjectHierarchyFolder(parameterNode);
 
   // Load treatment machine models
 
@@ -1041,6 +1125,45 @@ bool vtkSlicerRoomsEyeViewModuleLogic::GetPatientBodyPolyData(vtkMRMLRoomsEyeVie
 }
 
 //----------------------------------------------------------------------------
+bool vtkSlicerRoomsEyeViewModuleLogic::CalculateTableTopCenterFromPatientBodySegment(vtkMRMLRoomsEyeViewNode* parameterNode, double tableTopCenterRAS[3])
+{
+  if (!parameterNode)
+  {
+    vtkErrorMacro("CalculateTableTopCenterFromPatientBodySegment: Invalid parameter set node");
+    return false;
+  }
+
+  vtkNew<vtkPolyData> patientBodyPolyData;
+  if (!this->GetPatientBodyPolyData(parameterNode, patientBodyPolyData))
+  {
+    vtkErrorMacro("CalculateTableTopCenterFromPatientBodySegment: Failed to get patient body poly data");
+    return false;
+  }
+
+  double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+  patientBodyPolyData->GetBounds(bounds);
+  tableTopCenterRAS[0] = (bounds[0] + bounds[1]) / 2.0;
+  tableTopCenterRAS[1] = bounds[2]; // posterior extent (min Y in RAS)
+  tableTopCenterRAS[2] = (bounds[4] + bounds[5]) / 2.0;
+
+  // Update the fiducial node position if it exists
+  vtkMRMLMarkupsFiducialNode* fiducialNode = this->Internal->EnsureTableTopCenterPointFiducialNode(parameterNode);
+  if (fiducialNode)
+  {
+    if (fiducialNode->GetNumberOfControlPoints() == 0)
+    {
+      fiducialNode->AddControlPointWorld(tableTopCenterRAS, "TableTopCenter");
+    }
+    else
+    {
+      fiducialNode->SetNthControlPointPositionWorld(0, tableTopCenterRAS);
+    }
+  }
+
+  return true;
+}
+
+//----------------------------------------------------------------------------
 void vtkSlicerRoomsEyeViewModuleLogic::UpdateGantryToFixedReferenceTransform(vtkMRMLRoomsEyeViewNode* parameterNode)
 {
   if (!parameterNode)
@@ -1303,20 +1426,129 @@ void vtkSlicerRoomsEyeViewModuleLogic::UpdateTableTopToTableTopEccentricRotation
     return;
   }
 
+  this->IECLogic->UpdateTableTopToTableTopEccentricRotationTransform(
+    parameterNode->GetLateralTableTopDisplacement(),
+    parameterNode->GetLongitudinalTableTopDisplacement(),
+    parameterNode->GetVerticalTableTopDisplacement(),
+    0.0, 0.0); // pitch and roll not yet exposed in parameter node
   vtkMRMLLinearTransformNode* tableTopToTableTopEccentricRotationTransformNode =
     this->GetTransformNodeBetween(vtkIECTransformLogic::TableTop, vtkIECTransformLogic::TableTopEccentricRotation);
-  vtkTransform* tableTopEccentricRotationToPatientSupportTransform = vtkTransform::SafeDownCast(
-    tableTopToTableTopEccentricRotationTransformNode->GetTransformToParent() );
+  tableTopToTableTopEccentricRotationTransformNode->Modified(); // Modified call is needed because it does not update display in app
+}
 
-  double translationArray[3] =
-    { parameterNode->GetLateralTableTopDisplacement(), parameterNode->GetLongitudinalTableTopDisplacement(), parameterNode->GetVerticalTableTopDisplacement() };
+//-----------------------------------------------------------------------------
+void vtkSlicerRoomsEyeViewModuleLogic::UpdateTableTopCenterObservers(vtkMRMLRoomsEyeViewNode* parameterNode)
+{
+  // Remove existing observers (node may have been deleted, in which case weak pointer is null)
+  if (this->Internal->ObservedTableTopCenterFiducialNode)
+  {
+    for (unsigned long tag : this->Internal->TableTopCenterFiducialNodeObserverTags)
+    {
+      this->Internal->ObservedTableTopCenterFiducialNode->RemoveObserver(tag);
+    }
+  }
+  this->Internal->TableTopCenterFiducialNodeObserverTags.clear();
+  this->Internal->ObservedTableTopCenterFiducialNode = nullptr;
+  this->Internal->ObservedTableTopCenterParamNode = nullptr;
 
-  vtkNew<vtkMatrix4x4> tableTopEccentricRotationToPatientSupportMatrix;
-  tableTopEccentricRotationToPatientSupportMatrix->SetElement(0,3, translationArray[0]);
-  tableTopEccentricRotationToPatientSupportMatrix->SetElement(1,3, translationArray[1]);
-  tableTopEccentricRotationToPatientSupportMatrix->SetElement(2,3, translationArray[2]);
-  tableTopEccentricRotationToPatientSupportTransform->SetMatrix(tableTopEccentricRotationToPatientSupportMatrix);
-  tableTopEccentricRotationToPatientSupportTransform->Modified(); // Modified call is needed because it does not update display in app
+  vtkMRMLMarkupsFiducialNode* fiducialNode = parameterNode ? parameterNode->GetTableTopCenterPointFiducialNode() : nullptr;
+  if (!fiducialNode)
+  {
+    return;
+  }
+
+  this->Internal->ObservedTableTopCenterFiducialNode = fiducialNode;
+  this->Internal->ObservedTableTopCenterParamNode = parameterNode;
+
+  vtkNew<vtkCallbackCommand> callbackCommand;
+  callbackCommand->SetClientData(this);
+  callbackCommand->SetCallback([](vtkObject*, unsigned long, void* clientData, void*)
+  {
+    auto* self = static_cast<vtkSlicerRoomsEyeViewModuleLogic*>(clientData);
+    self->UpdateTableTopDisplacementFromTableTopCenter(self->Internal->ObservedTableTopCenterParamNode);
+  });
+
+  this->Internal->TableTopCenterFiducialNodeObserverTags.push_back(
+    fiducialNode->AddObserver(vtkMRMLMarkupsNode::PointPositionDefinedEvent, callbackCommand));
+  this->Internal->TableTopCenterFiducialNodeObserverTags.push_back(
+    fiducialNode->AddObserver(vtkMRMLMarkupsNode::PointEndInteractionEvent, callbackCommand));
+  this->Internal->TableTopCenterFiducialNodeObserverTags.push_back(
+    fiducialNode->AddObserver(vtkMRMLMarkupsNode::PointModifiedEvent, callbackCommand));
+}
+
+//-----------------------------------------------------------------------------
+void vtkSlicerRoomsEyeViewModuleLogic::UpdateTableTopDisplacementFromTableTopCenter(vtkMRMLRoomsEyeViewNode* parameterNode)
+{
+  if (!parameterNode)
+  {
+    return;
+  }
+
+  vtkMRMLMarkupsFiducialNode* fiducialNode = parameterNode->GetTableTopCenterPointFiducialNode();
+  if (!fiducialNode || fiducialNode->GetNumberOfControlPoints() == 0)
+  {
+    return;
+  }
+
+  // Get the TableTopEccentricRotation → RAS composite transform
+  vtkMRMLLinearTransformNode* tteTransformNode = this->GetTransformNodeBetween(
+    vtkIECTransformLogic::TableTopEccentricRotation, vtkIECTransformLogic::PatientSupportRotation);
+  if (!tteTransformNode)
+  {
+    vtkErrorMacro("UpdateTableTopDisplacementFromTableTopCenter: Failed to get TableTopEccentricRotation transform node");
+    return;
+  }
+
+  vtkNew<vtkMatrix4x4> tteToRAS;
+  tteTransformNode->GetMatrixTransformToWorld(tteToRAS);
+
+  vtkNew<vtkMatrix4x4> rasToTTE;
+  vtkMatrix4x4::Invert(tteToRAS, rasToTTE);
+
+  // Get current table top model center in world RAS
+  vtkMRMLModelNode* tableTopModelNode = this->Internal->GetTreatmentMachinePartModelNode(parameterNode, TableTop);
+  if (!tableTopModelNode)
+  {
+    vtkErrorMacro("UpdateTableTopDisplacementFromTableTopCenter: Failed to get table top model node");
+    return;
+  }
+  double tableTopBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+  tableTopModelNode->GetRASBounds(tableTopBounds);
+  double tableTopCenterRAS[3] = {
+    (tableTopBounds[0] + tableTopBounds[1]) / 2.0,
+    (tableTopBounds[2] + tableTopBounds[3]) / 2.0,
+    (tableTopBounds[4] + tableTopBounds[5]) / 2.0
+  };
+
+  // Compute delta from current table top center to fiducial (in RAS), then convert to TTE space.
+  // Transform as a vector (w=0) so only the rotational part of rasToTTE is applied.
+  double fiducialRAS[3] = { 0.0, 0.0, 0.0 };
+  fiducialNode->GetNthControlPointPositionWorld(0, fiducialRAS);
+  double deltaRAS[4] = {
+    fiducialRAS[0] - tableTopCenterRAS[0],
+    fiducialRAS[1] - tableTopCenterRAS[1],
+    fiducialRAS[2] - tableTopCenterRAS[2],
+    0.0  // w=0: vector, not point — translation in rasToTTE does not apply
+  };
+  double deltaTTE[4] = { 0.0, 0.0, 0.0, 0.0 };
+  rasToTTE->MultiplyPoint(deltaRAS, deltaTTE);
+
+  double newLateral     = vtkMath::ClampValue(parameterNode->GetLateralTableTopDisplacement()     + deltaTTE[0],
+    parameterNode->GetLateralTableTopDisplacementMin(),     parameterNode->GetLateralTableTopDisplacementMax());
+  double newLongitudinal = vtkMath::ClampValue(parameterNode->GetLongitudinalTableTopDisplacement() + deltaTTE[1],
+    parameterNode->GetLongitudinalTableTopDisplacementMin(), parameterNode->GetLongitudinalTableTopDisplacementMax());
+  double newVertical    = vtkMath::ClampValue(parameterNode->GetVerticalTableTopDisplacement()    + deltaTTE[2],
+    parameterNode->GetVerticalTableTopDisplacementMin(),    parameterNode->GetVerticalTableTopDisplacementMax());
+
+  // Apply displacements without triggering a feedback loop through MRML events
+  parameterNode->DisableModifiedEventOn();
+  parameterNode->SetLateralTableTopDisplacement(newLateral);
+  parameterNode->SetLongitudinalTableTopDisplacement(newLongitudinal);
+  parameterNode->SetVerticalTableTopDisplacement(newVertical);
+  parameterNode->DisableModifiedEventOff();
+  parameterNode->Modified();
+
+  this->UpdateTableTopToTableTopEccentricRotationTransform(parameterNode);
 }
 
 //-----------------------------------------------------------------------------
@@ -1472,6 +1704,26 @@ const char* vtkSlicerRoomsEyeViewModuleLogic::GetTreatmentMachinePartTypeAsStrin
 }
 
 //---------------------------------------------------------------------------
+void vtkSlicerRoomsEyeViewModuleLogic::SetTreatmentMachinePartsOpacityForBeamsEyeView(
+  vtkMRMLRoomsEyeViewNode* parameterNode, double opacity)
+{
+  if (!parameterNode
+    || !parameterNode->GetTreatmentMachineDescriptorFilePath()
+    || strlen(parameterNode->GetTreatmentMachineDescriptorFilePath()) == 0)
+  {
+    return;
+  }
+  for (TreatmentMachinePartType part : { Gantry, Collimator, TableTop })
+  {
+    vtkMRMLModelNode* model = this->Internal->GetTreatmentMachinePartModelNode(parameterNode, part);
+    if (model && model->GetDisplayNode())
+    {
+      model->GetDisplayNode()->SetOpacity(opacity);
+    }
+  }
+}
+
+//---------------------------------------------------------------------------
 std::string vtkSlicerRoomsEyeViewModuleLogic::GetNameForPartType(std::string partType)
 {
   rapidjson::Value& partObject = this->Internal->GetTreatmentMachinePart(partType);
@@ -1601,4 +1853,123 @@ std::string vtkSlicerRoomsEyeViewModuleLogic::GetStateForPartType(std::string pa
   }
 
   return stateStr;
+}
+
+
+//-----------------------------------------------------------------------------
+void vtkSlicerRoomsEyeViewModuleLogic::UpdatePlanPOIObservers(vtkMRMLRoomsEyeViewNode* parameterNode)
+{
+  if (!this->GetMRMLScene())
+  {
+    return;
+  }
+
+  // Get the plan's POI markups node via the beam node
+  vtkMRMLMarkupsFiducialNode* poiMarkupsNode = nullptr;
+  vtkMRMLRTPlanNode* planNode = nullptr;
+  vtkMRMLRTBeamNode* beamNode = parameterNode ? parameterNode->GetBeamNode() : nullptr;
+  if (beamNode)
+  {
+    planNode = beamNode->GetParentPlanNode();
+    if (planNode)
+    {
+      poiMarkupsNode = planNode->GetPoisMarkupsFiducialNode();
+    }
+  }
+
+  // Remove existing observers from the previously observed node
+  if (this->Internal->ObservedPOIMarkupsFiducialNode)
+  {
+    for (unsigned long tag : this->Internal->POIMarkupsFiducialNodeObserverTags)
+    {
+      this->Internal->ObservedPOIMarkupsFiducialNode->RemoveObserver(tag);
+    }
+    this->Internal->POIMarkupsFiducialNodeObserverTags.clear();
+    this->Internal->ObservedPOIMarkupsFiducialNode = nullptr;
+    this->Internal->ObservedPlanNode = nullptr;
+  }
+
+  if (!poiMarkupsNode)
+  {
+    return;
+  }
+
+  this->Internal->ObservedPOIMarkupsFiducialNode = poiMarkupsNode;
+  this->Internal->ObservedPlanNode = planNode;
+  this->Internal->ObservedParamNode = parameterNode;
+
+  vtkNew<vtkCallbackCommand> callbackCommand;
+  callbackCommand->SetClientData(this);
+  callbackCommand->SetCallback([](vtkObject* caller, unsigned long, void* clientData, void*)
+  {
+    auto* self = static_cast<vtkSlicerRoomsEyeViewModuleLogic*>(clientData);
+    self->OnPlanPOIChanged(vtkMRMLMarkupsFiducialNode::SafeDownCast(caller));
+  });
+
+  this->Internal->POIMarkupsFiducialNodeObserverTags.push_back(
+    poiMarkupsNode->AddObserver(vtkMRMLMarkupsNode::PointPositionDefinedEvent, callbackCommand));
+  this->Internal->POIMarkupsFiducialNodeObserverTags.push_back(
+    poiMarkupsNode->AddObserver(vtkMRMLMarkupsNode::PointPositionUndefinedEvent, callbackCommand));
+  this->Internal->POIMarkupsFiducialNodeObserverTags.push_back(
+    poiMarkupsNode->AddObserver(vtkMRMLMarkupsNode::PointEndInteractionEvent, callbackCommand));
+  this->Internal->POIMarkupsFiducialNodeObserverTags.push_back(
+    poiMarkupsNode->AddObserver(vtkMRMLMarkupsNode::PointModifiedEvent, callbackCommand));
+
+  this->OnPlanPOIChanged(poiMarkupsNode);
+}
+
+//-----------------------------------------------------------------------------
+void vtkSlicerRoomsEyeViewModuleLogic::UpdateFixedReferenceToRASTransform(vtkMRMLRoomsEyeViewNode* paramNode)
+{
+  vtkSlicerBeamsModuleLogic* beamsLogic = this->GetBeamsLogic();
+  if (!beamsLogic)
+  {
+    vtkErrorMacro("UpdateFixedReferenceToRASTransform: Beams logic cannot be accessed");
+    return;
+  }
+
+  if (paramNode)
+  {
+    // Temporarily set the IEC table top displacement for the RAS transform computation:
+    // - Unchecked: zero displacement so the machine is positioned based on the POI only
+    // - Checked: apply displacement relative to the baseline captured when the mode was
+    //   enabled, so the patient does not jump on first activation
+    double effectiveLat  = this->MovePatientWithTableTop
+      ? paramNode->GetLateralTableTopDisplacement()      - this->TableTopBaselineLateral      : 0.0;
+    double effectiveLong = this->MovePatientWithTableTop
+      ? paramNode->GetLongitudinalTableTopDisplacement() - this->TableTopBaselineLongitudinal : 0.0;
+    double effectiveVert = this->MovePatientWithTableTop
+      ? paramNode->GetVerticalTableTopDisplacement()     - this->TableTopBaselineVertical     : 0.0;
+    this->IECLogic->UpdateTableTopToTableTopEccentricRotationTransform(effectiveLat, effectiveLong, effectiveVert, 0.0, 0.0);
+  }
+
+  beamsLogic->UpdateFixedReferenceToRASTransform(this->IECLogic, this->Internal->ObservedPlanNode, nullptr);
+
+  if (paramNode)
+  {
+    // Restore the actual slider values so the table top visual position is correct
+    this->IECLogic->UpdateTableTopToTableTopEccentricRotationTransform(
+      paramNode->GetLateralTableTopDisplacement(),
+      paramNode->GetLongitudinalTableTopDisplacement(),
+      paramNode->GetVerticalTableTopDisplacement(),
+      0.0, 0.0);
+    vtkMRMLLinearTransformNode* tableTopNode = this->GetTransformNodeBetween(
+      vtkIECTransformLogic::TableTop, vtkIECTransformLogic::TableTopEccentricRotation);
+    if (tableTopNode)
+    {
+      tableTopNode->Modified();
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------
+void vtkSlicerRoomsEyeViewModuleLogic::OnPlanPOIChanged(vtkMRMLMarkupsFiducialNode* poiMarkupsFiducialNode)
+{
+  if (poiMarkupsFiducialNode == nullptr)
+  {
+    vtkErrorMacro("OnPlanPOIChanged: Invalid POI markups fiducial node");
+    return;
+  }
+
+  this->UpdateFixedReferenceToRASTransform(this->Internal->ObservedParamNode);
 }

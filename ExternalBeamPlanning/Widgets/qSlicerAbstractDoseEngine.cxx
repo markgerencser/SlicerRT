@@ -131,7 +131,7 @@ bool qSlicerAbstractDoseEngine::isInverse() const
 void qSlicerAbstractDoseEngine::setIsInverse(bool isInverse)
 {
   // TODO: is this correct to avoid setting the value except for Python engines?
-  qCritical() << Q_FUNC_INFO << ": Cannot set dose engine name by method, only in constructor";
+  qCritical() << Q_FUNC_INFO << ": Cannot set isInverse by method, only in constructor";
 }
 
 //----------------------------------------------------------------------------
@@ -143,14 +143,31 @@ bool qSlicerAbstractDoseEngine::canDoIonPlan() const
 //-----------------------------------------------------------------------------
 void qSlicerAbstractDoseEngine::setCanDoIonPlan(bool canDoIonPlan)
 {
-  qCritical() << Q_FUNC_INFO << ": Cannot set dose engine name by method, only in constructor";
+  qCritical() << Q_FUNC_INFO << ": Cannot set canDoIonPlan by method, only in constructor";
+}
+
+//-----------------------------------------------------------------------------
+bool qSlicerAbstractDoseEngine::supportsBodySegment() const
+{
+  return this->m_SupportsBodySegment;
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerAbstractDoseEngine::setSupportsBodySegment(bool supportsBodySegment)
+{
+  qCritical() << Q_FUNC_INFO << ": Cannot set supportsBodySegment by method, only in constructor";
 }
 
 //----------------------------------------------------------------------------
 void qSlicerAbstractDoseEngine::registerBeamParametersTabWidget(qMRMLBeamParametersTabWidget* tabWidget)
 {
-  qSlicerAbstractDoseEngine::m_BeamParametersTabWidgets.insert(tabWidget);
+  // Check if this tab widget has already been registered
+  if (qSlicerAbstractDoseEngine::m_BeamParametersTabWidgets.contains(tabWidget))
+  {
+    return;
+  }
 
+  qSlicerAbstractDoseEngine::m_BeamParametersTabWidgets.insert(tabWidget);
   // Make sure beam parameters specified by engines are defined in the tab widget
   qSlicerDoseEnginePluginHandler::DoseEngineListType engines =
     qSlicerDoseEnginePluginHandler::instance()->registeredDoseEngines();

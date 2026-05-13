@@ -39,6 +39,7 @@
 #include <qSlicerLayoutManager.h>
 #include <qSlicerIOManager.h>
 #include <qSlicerDataDialog.h>
+#include <qSlicerMarkupsPlaceWidget.h>
 #include <qSlicerSaveDataDialog.h>
 #include <qSlicerSubjectHierarchyFolderPlugin.h>
 #include <qSlicerSubjectHierarchyPluginHandler.h>
@@ -47,29 +48,32 @@
 #include <qMRMLThreeDView.h>
 
 // MRML includes
-#include <vtkMRMLScene.h>
-#include <vtkMRMLLinearTransformNode.h>
-#include <vtkMRMLDisplayNode.h>
-#include <vtkMRMLModelNode.h>
-#include <vtkMRMLSegmentationNode.h>
 #include <vtkMRMLCameraNode.h>
-#include <vtkMRMLViewNode.h>
+#include <vtkMRMLDisplayNode.h>
+#include <vtkMRMLLinearTransformNode.h>
+#include <vtkMRMLMarkupsFiducialNode.h>
+#include <vtkMRMLModelNode.h>
+#include <vtkMRMLScene.h>
+#include <vtkMRMLSegmentationNode.h>
 #include <vtkMRMLSliceNode.h>
-#include <vtkMRMLTransformNode.h>
 #include <vtkMRMLSubjectHierarchyNode.h>
+#include <vtkMRMLTransformNode.h>
+#include <vtkMRMLViewNode.h>
 
 // Qt includes
+#include <QAction>
 #include <QDebug>
 #include <QDir>
 #include <QFileDialog>
 
 // CTK includes
+#include <ctkColorPickerButton.h>
 #include <ctkMessageBox.h>
 #include <ctkSliderWidget.h>
 
 // VTK includes
 #include <vtkCamera.h>
-#include "vtkCollisionDetectionFilter.h"
+#include <vtkCollisionDetectionFilter.h>
 #include <vtkPolyData.h>
 #include <vtkMatrix4x4.h>
 #include <vtkTransform.h>
@@ -314,6 +318,11 @@ void qSlicerRoomsEyeViewModuleWidget::setParameterNode(vtkMRMLNode *node)
     {
       paramNode->SetPatientBodySegmentID(d->SegmentSelectorWidget_PatientBody->currentSegmentID().toUtf8().constData());
     }
+    // Set up POI markups observers if a beam is already selected
+    if (paramNode->GetBeamNode())
+    {
+      d->logic()->UpdatePlanPOIObservers(paramNode);
+    }
   }
 
   this->updateWidgetFromMRML();
@@ -382,6 +391,7 @@ void qSlicerRoomsEyeViewModuleWidget::setup()
   connect(d->VerticalTableTopDisplacementSlider, SIGNAL(valueChanged(double)), this, SLOT(onVerticalTableTopDisplacementSliderValueChanged(double)));
   connect(d->LongitudinalTableTopDisplacementSlider, SIGNAL(valueChanged(double)), this, SLOT(onLongitudinalTableTopDisplacementSliderValueChanged(double)));
   connect(d->LateralTableTopDisplacementSlider, SIGNAL(valueChanged(double)), this, SLOT(onLateralTableTopDisplacementSliderValueChanged(double)));
+  connect(d->MovePatientWithTableTopCheckBox, SIGNAL(toggled(bool)), this, SLOT(onMovePatientWithTableTopCheckBoxToggled(bool)));
 
   connect(d->BeamsEyeViewButton, SIGNAL(clicked()), this, SLOT(onBeamsEyeViewButtonClicked()));
 
@@ -448,9 +458,10 @@ void qSlicerRoomsEyeViewModuleWidget::onBeamNodeChanged(vtkMRMLNode* node)
   for (std::vector<vtkMRMLNode*>::iterator beamIt=beamNodes.begin(); beamIt!=beamNodes.end(); ++beamIt)
   {
     vtkMRMLRTBeamNode* currentBeamNode = vtkMRMLRTBeamNode::SafeDownCast(*beamIt);
-    shNode->SetItemDisplayVisibility(
-      shNode->GetItemByDataNode(currentBeamNode), (currentBeamNode == beamNode ? 1 : 0) );
+    shNode->SetItemDisplayVisibility(shNode->GetItemByDataNode(currentBeamNode), (currentBeamNode == beamNode ? 1 : 0) );
   }
+
+  this->setMachinePartsOpacityForBeamsEyeView(1.0);
 
   if (!beamNode)
   {
@@ -459,6 +470,12 @@ void qSlicerRoomsEyeViewModuleWidget::onBeamNodeChanged(vtkMRMLNode* node)
 
   // Trigger update of transforms based on selected beam
   beamNode->InvokeCustomModifiedEvent(vtkMRMLRTBeamNode::BeamTransformModified);
+
+  // Sync gantry angle slider from the selected beam
+  d->GantryRotationSlider->setValue(beamNode->GetGantryAngle());
+
+  // Update POI markups observers for the new beam's plan
+  d->logic()->UpdatePlanPOIObservers(paramNode);
 
   // Select patient segmentation
   vtkMRMLRTPlanNode* planNode = beamNode->GetParentPlanNode();
@@ -528,6 +545,76 @@ void qSlicerRoomsEyeViewModuleWidget::onPatientBodySegmentChanged(QString segmen
   paramNode->DisableModifiedEventOn();
   paramNode->SetPatientBodySegmentID(segmentID.toUtf8().constData());
   paramNode->DisableModifiedEventOff();
+
+  this->applyTableTopPositionFromBodySegment(paramNode);
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerRoomsEyeViewModuleWidget::applyTableTopPositionFromBodySegment(vtkMRMLRoomsEyeViewNode* paramNode)
+{
+  Q_D(qSlicerRoomsEyeViewModuleWidget);
+
+  if (!paramNode)
+  {
+    return;
+  }
+
+  bool autoPositionNeeded = d->MovePatientWithTableTopCheckBox->isChecked() && d->GantryRotationSlider->isEnabled();
+  if (autoPositionNeeded)
+  {
+    d->logic()->SetTableTopBaseline(
+      paramNode->GetLateralTableTopDisplacement(),
+      paramNode->GetLongitudinalTableTopDisplacement(),
+      paramNode->GetVerticalTableTopDisplacement());
+    d->logic()->UpdateFixedReferenceToRASTransform(paramNode);
+
+    // Block slider signals so the paramNode->Modified() fired inside
+    // UpdateTableTopDisplacementFromTableTopCenter does not re-enter slider callbacks.
+    d->LateralTableTopDisplacementSlider->blockSignals(true);
+    d->LongitudinalTableTopDisplacementSlider->blockSignals(true);
+    d->VerticalTableTopDisplacementSlider->blockSignals(true);
+  }
+
+  // Recompute the TableTopCenter fiducial — synchronously fires the observer which
+  // calls UpdateTableTopDisplacementFromTableTopCenter and updates paramNode slider values
+  double tableTopCenterRAS[3] = { 0.0, 0.0, 0.0 };
+  bool fiducialOk = d->logic()->CalculateTableTopCenterFromPatientBodySegment(paramNode, tableTopCenterRAS);
+
+  if (autoPositionNeeded)
+  {
+    d->LateralTableTopDisplacementSlider->blockSignals(false);
+    d->LongitudinalTableTopDisplacementSlider->blockSignals(false);
+    d->VerticalTableTopDisplacementSlider->blockSignals(false);
+  }
+
+  // Only auto-position the table top when the mode is active and the machine is loaded
+  if (!d->MovePatientWithTableTopCheckBox->isChecked() || !d->GantryRotationSlider->isEnabled() || !fiducialOk)
+  {
+    return;
+  }
+
+  // The observer already updated paramNode slider values and the IEC table top transform.
+  // Update patient support (required for vertical) and sync the UI sliders.
+  d->logic()->UpdatePatientSupportToPatientSupportRotationTransform(paramNode);
+
+  d->LateralTableTopDisplacementSlider->blockSignals(true);
+  d->LongitudinalTableTopDisplacementSlider->blockSignals(true);
+  d->VerticalTableTopDisplacementSlider->blockSignals(true);
+  d->LateralTableTopDisplacementSlider->setValue(paramNode->GetLateralTableTopDisplacement());
+  d->LongitudinalTableTopDisplacementSlider->setValue(paramNode->GetLongitudinalTableTopDisplacement());
+  d->VerticalTableTopDisplacementSlider->setValue(paramNode->GetVerticalTableTopDisplacement());
+  d->LateralTableTopDisplacementSlider->blockSignals(false);
+  d->LongitudinalTableTopDisplacementSlider->blockSignals(false);
+  d->VerticalTableTopDisplacementSlider->blockSignals(false);
+
+  // Reset the baseline so effective displacement stays zero after auto-positioning
+  // (machine stays at isocenter — no jump when user subsequently moves sliders)
+  d->logic()->SetTableTopBaseline(
+    paramNode->GetLateralTableTopDisplacement(),
+    paramNode->GetLongitudinalTableTopDisplacement(),
+    paramNode->GetVerticalTableTopDisplacement());
+
+  d->logic()->UpdateFixedReferenceToRASTransform(paramNode);
 }
 
 //-----------------------------------------------------------------------------
@@ -685,6 +772,17 @@ void qSlicerRoomsEyeViewModuleWidget::loadTreatmentMachineFromFile(QString descr
     d->LateralTableTopDisplacementSlider->setMaximum(250.0);
   }
 
+  // Propagate slider limits to paramNode so the logic can clamp displacements from the fiducial
+  if (paramNode)
+  {
+    paramNode->SetLateralTableTopDisplacementMin(d->LateralTableTopDisplacementSlider->minimum());
+    paramNode->SetLateralTableTopDisplacementMax(d->LateralTableTopDisplacementSlider->maximum());
+    paramNode->SetLongitudinalTableTopDisplacementMin(d->LongitudinalTableTopDisplacementSlider->minimum());
+    paramNode->SetLongitudinalTableTopDisplacementMax(d->LongitudinalTableTopDisplacementSlider->maximum());
+    paramNode->SetVerticalTableTopDisplacementMin(d->VerticalTableTopDisplacementSlider->minimum());
+    paramNode->SetVerticalTableTopDisplacementMax(d->VerticalTableTopDisplacementSlider->maximum());
+  }
+
   // Reset camera
   qSlicerApplication* slicerApplication = qSlicerApplication::application();
   slicerApplication->layoutManager()->resetThreeDViews();
@@ -698,6 +796,13 @@ void qSlicerRoomsEyeViewModuleWidget::loadTreatmentMachineFromFile(QString descr
   d->LateralTableTopDisplacementSlider->setEnabled(true);
   d->ImagingPanelMovementSlider->setEnabled(true);
 
+  // If a beam is already selected, sync the gantry (and related) sliders from it
+  vtkMRMLRTBeamNode* selectedBeamNode = paramNode ? vtkMRMLRTBeamNode::SafeDownCast(paramNode->GetBeamNode()) : nullptr;
+  if (selectedBeamNode)
+  {
+    d->GantryRotationSlider->setValue(selectedBeamNode->GetGantryAngle());
+  }
+
   // Hide controls that do not have corresponding parts loaded
   bool imagingPanelsLoaded = (std::find(loadedParts.begin(), loadedParts.end(), vtkSlicerRoomsEyeViewModuleLogic::ImagingPanelLeft) != loadedParts.end() ||
       std::find(loadedParts.begin(), loadedParts.end(), vtkSlicerRoomsEyeViewModuleLogic::ImagingPanelRight) != loadedParts.end());
@@ -708,6 +813,22 @@ void qSlicerRoomsEyeViewModuleWidget::loadTreatmentMachineFromFile(QString descr
   //TODO: Add new option 'Treatment room' to orientation marker choices and merged model with actual colors (surface scalars?)
   //vtkMRMLViewNode* viewNode = threeDView->mrmlViewNode();
   //viewNode->SetOrientationMarkerHumanModelNodeID(this->mrmlScene()->GetFirstNodeByName("EBRTOrientationMarkerModel")->GetID());
+
+  // Ensure the machine is positioned using effective displacement (current - baseline) before
+  // auto-positioning from segment. BuildRoomsEyeViewTransformHierarchy (called inside
+  // LoadTreatmentMachine) uses actual IEC state, not effective displacement, so when
+  // baseline != 0 the machine ends up at the wrong position until we correct it here.
+  if (d->MovePatientWithTableTopCheckBox->isChecked())
+  {
+    d->logic()->UpdateFixedReferenceToRASTransform(paramNode);
+  }
+
+  // If a body segment is already selected and the checkbox is checked, auto-position the table top.
+  // applyTableTopPositionFromBodySegment resets the baseline internally after auto-positioning.
+  if (paramNode->GetPatientBodySegmentationNode() && paramNode->GetPatientBodySegmentID())
+  {
+    this->applyTableTopPositionFromBodySegment(paramNode);
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -767,6 +888,7 @@ void qSlicerRoomsEyeViewModuleWidget::onGantryRotationSliderValueChanged(double 
     beamNode->SetGantryAngle(value);
   }
 
+  this->setMachinePartsOpacityForBeamsEyeView(1.0);
   this->checkForCollisions();
   this->updateTreatmentOrientationMarker();
   d->getLayoutManager()->resumeRender();
@@ -805,11 +927,6 @@ void qSlicerRoomsEyeViewModuleWidget::onPatientSupportRotationSliderValueChanged
   {
     return;
   }
-  vtkSlicerBeamsModuleLogic* beamsLogic = vtkSlicerBeamsModuleLogic::SafeDownCast(d->logic()->GetModuleLogic("Beams"));
-  if (!beamsLogic)
-  {
-    return;
-  }
   d->getLayoutManager()->pauseRender();
 
   paramNode->DisableModifiedEventOn();
@@ -818,7 +935,7 @@ void qSlicerRoomsEyeViewModuleWidget::onPatientSupportRotationSliderValueChanged
 
   // Update IEC transform
   d->logic()->UpdatePatientSupportRotationToFixedReferenceTransform(paramNode);
-  beamsLogic->UpdateRASRelatedTransforms(d->logic()->GetIECLogic(), d->currentPlanNode(paramNode));
+  d->logic()->UpdateFixedReferenceToRASTransform(paramNode);
 
   // Update beam parameter
   vtkMRMLRTBeamNode* beamNode = vtkMRMLRTBeamNode::SafeDownCast(paramNode->GetBeamNode());
@@ -851,11 +968,6 @@ void qSlicerRoomsEyeViewModuleWidget::onVerticalTableTopDisplacementSliderValueC
   {
     return;
   }
-  vtkSlicerBeamsModuleLogic* beamsLogic = vtkSlicerBeamsModuleLogic::SafeDownCast(d->logic()->GetModuleLogic("Beams"));
-  if (!beamsLogic)
-  {
-    return;
-  }
   d->getLayoutManager()->pauseRender();
 
   paramNode->DisableModifiedEventOn();
@@ -864,7 +976,10 @@ void qSlicerRoomsEyeViewModuleWidget::onVerticalTableTopDisplacementSliderValueC
 
   d->logic()->UpdatePatientSupportToPatientSupportRotationTransform(paramNode);
   d->logic()->UpdateTableTopToTableTopEccentricRotationTransform(paramNode);
-  beamsLogic->UpdateRASRelatedTransforms(d->logic()->GetIECLogic(), d->currentPlanNode(paramNode));
+  if (d->MovePatientWithTableTopCheckBox->isChecked())
+  {
+    d->logic()->UpdateFixedReferenceToRASTransform(paramNode);
+  }
 
   this->checkForCollisions();
   this->updateTreatmentOrientationMarker();
@@ -881,11 +996,6 @@ void qSlicerRoomsEyeViewModuleWidget::onLongitudinalTableTopDisplacementSliderVa
   {
     return;
   }
-  vtkSlicerBeamsModuleLogic* beamsLogic = vtkSlicerBeamsModuleLogic::SafeDownCast(d->logic()->GetModuleLogic("Beams"));
-  if (!beamsLogic)
-  {
-    return;
-  }
   d->getLayoutManager()->pauseRender();
 
   paramNode->DisableModifiedEventOn();
@@ -893,7 +1003,10 @@ void qSlicerRoomsEyeViewModuleWidget::onLongitudinalTableTopDisplacementSliderVa
   paramNode->DisableModifiedEventOff();
 
   d->logic()->UpdateTableTopToTableTopEccentricRotationTransform(paramNode);
-  beamsLogic->UpdateRASRelatedTransforms(d->logic()->GetIECLogic(), d->currentPlanNode(paramNode));
+  if (d->MovePatientWithTableTopCheckBox->isChecked())
+  {
+    d->logic()->UpdateFixedReferenceToRASTransform(paramNode);
+  }
 
   this->checkForCollisions();
   this->updateTreatmentOrientationMarker();
@@ -912,11 +1025,6 @@ void qSlicerRoomsEyeViewModuleWidget::onLateralTableTopDisplacementSliderValueCh
   {
     return;
   }
-  vtkSlicerBeamsModuleLogic* beamsLogic = vtkSlicerBeamsModuleLogic::SafeDownCast(d->logic()->GetModuleLogic("Beams"));
-  if (!beamsLogic)
-  {
-    return;
-  }
   d->getLayoutManager()->pauseRender();
 
   paramNode->DisableModifiedEventOn();
@@ -924,11 +1032,86 @@ void qSlicerRoomsEyeViewModuleWidget::onLateralTableTopDisplacementSliderValueCh
   paramNode->DisableModifiedEventOff();
 
   d->logic()->UpdateTableTopToTableTopEccentricRotationTransform(paramNode);
-  beamsLogic->UpdateRASRelatedTransforms(d->logic()->GetIECLogic(), d->currentPlanNode(paramNode));
+  if (d->MovePatientWithTableTopCheckBox->isChecked())
+  {
+    d->logic()->UpdateFixedReferenceToRASTransform(paramNode);
+  }
 
   this->checkForCollisions();
   this->updateTreatmentOrientationMarker();
   d->getLayoutManager()->resumeRender();
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerRoomsEyeViewModuleWidget::onMovePatientWithTableTopCheckBoxToggled(bool checked)
+{
+  Q_D(qSlicerRoomsEyeViewModuleWidget);
+
+  vtkMRMLRoomsEyeViewNode* paramNode = vtkMRMLRoomsEyeViewNode::SafeDownCast(d->MRMLNodeComboBox_ParameterSet->currentNode());
+  if (!paramNode || !d->ModuleWindowInitialized)
+  {
+    return;
+  }
+  if (checked)
+  {
+    if (paramNode->GetBeamNode())
+    {
+      QMessageBox::warning(this, tr("Move patient with table top"),
+        tr("There is a plan isocenter defined. By enabling this option you will move this isocenter "
+           "away from the machine isocenter. You can return to matching isocenters any time by turning it back off."));
+    }
+
+    d->MRMLNodeComboBox_Beam->setCurrentNode(nullptr);
+
+    // Capture current slider positions as the baseline so the patient does not jump
+    // when the mode is first enabled. Subsequent movements apply incrementally from here.
+    d->logic()->SetTableTopBaseline(
+      paramNode->GetLateralTableTopDisplacement(),
+      paramNode->GetLongitudinalTableTopDisplacement(),
+      paramNode->GetVerticalTableTopDisplacement());
+  }
+
+  d->logic()->SetMovePatientWithTableTop(checked);
+
+  if (!checked)
+  {
+    // Restore table top sliders and paramNode to the baseline values captured when checking,
+    // so both the table top and the patient return to where they were before the mode was enabled
+    double lat  = d->logic()->GetTableTopBaselineLateral();
+    double longg = d->logic()->GetTableTopBaselineLongitudinal();
+    double vert = d->logic()->GetTableTopBaselineVertical();
+
+    d->LateralTableTopDisplacementSlider->blockSignals(true);
+    d->LongitudinalTableTopDisplacementSlider->blockSignals(true);
+    d->VerticalTableTopDisplacementSlider->blockSignals(true);
+    d->LateralTableTopDisplacementSlider->setValue(lat);
+    d->LongitudinalTableTopDisplacementSlider->setValue(longg);
+    d->VerticalTableTopDisplacementSlider->setValue(vert);
+    d->LateralTableTopDisplacementSlider->blockSignals(false);
+    d->LongitudinalTableTopDisplacementSlider->blockSignals(false);
+    d->VerticalTableTopDisplacementSlider->blockSignals(false);
+
+    paramNode->DisableModifiedEventOn();
+    paramNode->SetLateralTableTopDisplacement(lat);
+    paramNode->SetLongitudinalTableTopDisplacement(longg);
+    paramNode->SetVerticalTableTopDisplacement(vert);
+    paramNode->DisableModifiedEventOff();
+
+    d->logic()->UpdatePatientSupportToPatientSupportRotationTransform(paramNode);
+    d->logic()->UpdateTableTopToTableTopEccentricRotationTransform(paramNode);
+
+    // Resync machine position back to POI-only with table top at baseline
+    d->logic()->UpdateFixedReferenceToRASTransform(paramNode);
+  }
+  // When checking: effective displacement is (current - baseline) = 0, so no position change occurs
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerRoomsEyeViewModuleWidget::setMachinePartsOpacityForBeamsEyeView(double opacity)
+{
+  Q_D(qSlicerRoomsEyeViewModuleWidget);
+  vtkMRMLRoomsEyeViewNode* paramNode = vtkMRMLRoomsEyeViewNode::SafeDownCast(d->MRMLNodeComboBox_ParameterSet->currentNode());
+  d->logic()->SetTreatmentMachinePartsOpacityForBeamsEyeView(paramNode, opacity);
 }
 
 //-----------------------------------------------------------------------------
@@ -991,7 +1174,7 @@ void qSlicerRoomsEyeViewModuleWidget::onBeamsEyeViewButtonClicked()
     cameraNode->SetViewUp(vup);
   }
 
-  cameraNode->GetCamera()->Elevation(-(d->GantryRotationSlider->value()));
+  this->setMachinePartsOpacityForBeamsEyeView(0.1);
 
   //TODO: Oblique slice updating real-time based on beam geometry
   //vtkMRMLSliceNode* redSliceNode = redSliceWidget->mrmlSliceNode();
@@ -1079,8 +1262,7 @@ void qSlicerRoomsEyeViewModuleWidget::setFixedReferenceCameraEnabled(bool toggle
 
   // Get FixedReference -> RAS transform node
   vtkMRMLLinearTransformNode* fixedReferenceToRasTransformNode = d->logic()->GetTransformNodeBetween(
-    vtkIECTransformLogic::FixedReference,
-    vtkIECTransformLogic::RAS);
+    vtkIECTransformLogic::FixedReference, vtkIECTransformLogic::RAS);
 
   vtkNew<vtkMatrix4x4> fixedReferenceToRasTransformMatrix;
   fixedReferenceToRasTransformMatrix->Identity();

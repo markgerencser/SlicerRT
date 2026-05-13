@@ -294,12 +294,12 @@ void qSlicerExternalBeamPlanningModuleWidget::onEnter()
   context.evalScript(QString(
     "try:\n"
     " import pyRadPlan\n"
-    " assert pyRadPlan.__version__ == '0.2.8'\n"
+    " assert pyRadPlan.__version__ == '0.3.1'\n"
     "except (ImportError, AttributeError, AssertionError):\n"
     " if slicer.util.confirmOkCancelDisplay("
-    "   'This module requires pyRadPlan.\\nClick OK to install it now. Slicer will automatically restart.'\n"
+    "   'This module requires pyRadPlan (version 0.3.1).\\nClick OK to install it now. Slicer will automatically restart.'\n"
     " ):\n"
-    "   slicer.util.pip_install('pyRadPlan==0.2.8')\n"
+    "   slicer.util.pip_install('pyRadPlan==0.3.1')\n"
     "   slicer.app.restart()\n"));
 }
 
@@ -341,6 +341,8 @@ void qSlicerExternalBeamPlanningModuleWidget::setup()
 
   connect( d->MRMLSegmentSelectorWidget_TargetStructure, SIGNAL(currentSegmentChanged(QString)), this, SLOT(targetSegmentChanged(const QString&)) );
   connect( d->checkBox_IsocenterAtTargetCenter, SIGNAL(stateChanged(int)), this, SLOT(isocenterAtTargetCenterCheckboxStateChanged(int)));
+
+  connect(d->MRMLSegmentSelectorWidget_BodyStructure, SIGNAL(currentSegmentChanged(QString)), this, SLOT(bodySegmentChanged(const QString&)));
 
   connect( d->checkBox_InversePlanning, SIGNAL(stateChanged(int)), this, SLOT(inversePlanningCheckboxStateChanged(int)));
 
@@ -430,6 +432,10 @@ void qSlicerExternalBeamPlanningModuleWidget::updateWidgetFromMRML()
   d->MRMLSegmentSelectorWidget_TargetStructure->setCurrentNode(planNode->GetSegmentationNode());
   d->MRMLSegmentSelectorWidget_TargetStructure->setCurrentSegmentID(planNode->GetTargetSegmentID());
 
+  // Set body segment
+  d->MRMLSegmentSelectorWidget_BodyStructure->setCurrentNode(planNode->GetSegmentationNode());
+  d->MRMLSegmentSelectorWidget_BodyStructure->setCurrentSegmentID(planNode->GetBodySegmentID());
+
   // Update isocenter specification
   d->checkBox_IsocenterAtTargetCenter->setChecked(planNode->GetIsocenterSpecification() == vtkMRMLRTPlanNode::CenterOfTarget);
   // Update isocenter controls based on plan isocenter position
@@ -491,6 +497,9 @@ void qSlicerExternalBeamPlanningModuleWidget::setPlanNode(vtkMRMLNode* node)
     {
       planNode->SetIonPlanFlag(true);
     }
+
+    // Set inverse flag according to plan
+    d->checkBox_InversePlanning->setChecked(planNode->GetInversePlanFlag());
 
     // Set input segmentation and reference volume if specified by DICOM
     vtkIdType planShItemID = shNode->GetItemByDataNode(planNode);
@@ -621,8 +630,9 @@ void qSlicerExternalBeamPlanningModuleWidget::segmentationNodeChanged(vtkMRMLNod
   planNode->SetAndObserveSegmentationNode(vtkMRMLSegmentationNode::SafeDownCast(node));
   planNode->DisableModifiedEventOff();
 
-  // Set segmentation node to target selector
+  // Set segmentation node to target and body selector
   d->MRMLSegmentSelectorWidget_TargetStructure->setCurrentNode(node);
+  d->MRMLSegmentSelectorWidget_BodyStructure->setCurrentNode(node);
 }
 
 //-----------------------------------------------------------------------------
@@ -854,6 +864,30 @@ void qSlicerExternalBeamPlanningModuleWidget::targetSegmentChanged(const QString
 }
 
 //-----------------------------------------------------------------------------
+void qSlicerExternalBeamPlanningModuleWidget::bodySegmentChanged(const QString& segment)
+{
+  Q_D(qSlicerExternalBeamPlanningModuleWidget);
+
+  if (!this->mrmlScene())
+  {
+    qCritical() << Q_FUNC_INFO << ": Invalid scene";
+    return;
+  }
+
+  vtkMRMLRTPlanNode* planNode = vtkMRMLRTPlanNode::SafeDownCast(d->MRMLNodeComboBox_RtPlan->currentNode());
+  if (!planNode)
+  {
+    qCritical() << Q_FUNC_INFO << ": Invalid RT plan node";
+    return;
+  }
+
+  // Set body segment ID
+  planNode->DisableModifiedEventOn();
+  planNode->SetBodySegmentID(segment.toUtf8().constData());
+  planNode->DisableModifiedEventOff();
+}
+
+//-----------------------------------------------------------------------------
 void qSlicerExternalBeamPlanningModuleWidget::isocenterAtTargetCenterCheckboxStateChanged(int state)
 {
   Q_D(qSlicerExternalBeamPlanningModuleWidget);
@@ -1000,24 +1034,22 @@ void qSlicerExternalBeamPlanningModuleWidget::inversePlanningCheckboxStateChange
 {
   Q_D(qSlicerExternalBeamPlanningModuleWidget);
 
-  //TODO: should we write the inverse planning flag to the plan node?
+  vtkMRMLRTPlanNode* planNode = vtkMRMLRTPlanNode::SafeDownCast(d->MRMLNodeComboBox_RtPlan->currentNode());
+  if (!planNode)
+  {
+    qCritical() << Q_FUNC_INFO << ": Invalid RT plan node";
+    return;
+  }
+
+  d->pushButton_OptimizePlan->setEnabled(state);
+  planNode->SetInversePlanFlag(state);
+  d->CollapsibleButton_Objectives->setEnabled(state);
 
   // Update dose engines
   this->updateDoseEngines();
 
   // Update Optimization engines
   this->updatePlanOptimizers();
-
-  if (d->checkBox_InversePlanning->isChecked())
-  {
-      d->pushButton_OptimizePlan->setEnabled(true);
-   d->CollapsibleButton_Objectives->setEnabled(true);
-  }
-  else
-  {
-      d->pushButton_OptimizePlan->setEnabled(false);
-   d->CollapsibleButton_Objectives->setEnabled(false);
-  }
 }
 
 //-----------------------------------------------------------------------------
@@ -1153,9 +1185,6 @@ void qSlicerExternalBeamPlanningModuleWidget::updatePlanOptimizers()
   // not been applied, then it needs to be done now)
   this->PlanOptimizerChanged(d->comboBox_PlanOptimizer->currentText());
 
-  // Update beam parameter tab visibility
-  //d->PlanOptimizerLogic->applyDoseEngineInPlan(planNode);
-
   d->comboBox_PlanOptimizer->blockSignals(false);
 }
 
@@ -1189,6 +1218,8 @@ void qSlicerExternalBeamPlanningModuleWidget::doseEngineChanged(const QString &t
   planNode->DisableModifiedEventOn();
   planNode->SetDoseEngineName(selectedEngine->name().toUtf8().constData());
   planNode->DisableModifiedEventOff();
+
+  d->MRMLSegmentSelectorWidget_BodyStructure->setEnabled(selectedEngine->supportsBodySegment());
 }
 
 //-----------------------------------------------------------------------------
